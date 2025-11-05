@@ -31,7 +31,7 @@ To build the docker image
 ```
 docker build -t chatserver -f dockerfile .
 
-docker run --rm -p 9090:9090 chatserver
+docker run --init --rm -p 9090:9090 chatserver
 ```
 Then call the client with
 ```

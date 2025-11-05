@@ -77,7 +77,6 @@ public:
   explicit ChatServiceImpl() {}
 
   ~ChatServiceImpl() override {
-    EndAllReaders();
     cout << "System: ChatServiceImpl destroyed" << endl;
   }
 
@@ -124,18 +123,6 @@ public:
   std::vector<ChatMessage> GetReceivedMessages() {
     lock_guard<mutex> lock(mu_);
     return received_messages_;
-  }
-
-  void EndAllReaders() {
-    lock_guard<mutex> lock(readers_mu_);
-    for (Reader *r : received_readers_) {
-      if (!r->done) {
-        r->EndChat();
-      } else {
-        delete r;
-      }
-    }
-    received_readers_.clear();
   }
 
 private:
