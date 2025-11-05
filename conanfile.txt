@@ -1,0 +1,6 @@
+[requires]
+grpc/1.72.0
+
+[generators]
+PkgConfigDeps
+MesonToolchain
