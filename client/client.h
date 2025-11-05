@@ -1,7 +1,6 @@
-
-
+#pragma once
+#define GRPC_CALLBACK_API_NONEXPERIMENTAL
 #include <grpc/grpc.h>
-#include <grpcpp/alarm.h>
 #include <grpcpp/channel.h>
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
@@ -13,19 +12,26 @@
 #include <string>
 #include <thread>
 
-#include "chatservice.grpc.pb.h"
-#include "chatservice.pb.h"
+#include "proto/chatservice.grpc.pb.h"
+#include "proto/chatservice.pb.h"
+
 using namespace std;
 using namespace grpc;
 using namespace grpc::experimental;
 using namespace chat;
 
-class Reader : public grpc::ClientReadReactor<ChatMessage> {
+class ReadChatStub : public grpc::ClientReadReactor<ChatMessage> {
 public:
-  Reader(ChatService::Stub *stub, const ChatReader reader) : reader_(reader) {
+  ReadChatStub(ChatService::Stub *stub, const ChatReader reader)
+      : reader_(reader) {
     stub->async()->ReadChat(&context_, &reader_, this);
     StartRead(&message_);
     StartCall();
+  }
+
+  ~ReadChatStub() override {
+    context_.TryCancel();
+    cout << "System: ReadChatStub destroyed" << endl;
   }
 
   void OnReadDone(bool ok) override {
@@ -42,7 +48,7 @@ public:
     cv_.notify_one();
   }
 
-  void EndChat() {
+  void EndRead() {
     unique_lock<mutex> l(mu_);
     status_ = Status::OK;
     done_ = true;
@@ -51,8 +57,8 @@ public:
 
   Status Await() {
     unique_lock<mutex> l(mu_);
-    cv_.wait(l, [this] { return done_; });
-    return std::move(status_);
+    cv_.wait(l);
+    return status_;
   }
 
 private:
@@ -63,12 +69,19 @@ private:
   bool done_ = false;
   const ChatReader reader_;
   ChatMessage message_;
+
+  friend class ChatServiceClient;
 };
 
 class ChatServiceClient {
 public:
   ChatServiceClient(string user_name, std::shared_ptr<Channel> channel)
       : stub_(ChatService::NewStub(channel)), user_name_(user_name) {}
+
+  ~ChatServiceClient() {
+    EndChat();
+    cout << "System: ChatServiceClient destroyed" << endl;
+  }
 
   void Send(string message) {
     ChatMessage chat_message;
@@ -77,59 +90,36 @@ public:
     ClientContext context;
     Response res;
     Status status = stub_->Send(&context, chat_message, &res);
-    if (status.ok()) {
-      cout << "System: Message sent successfully: " << res.result() << endl;
-    } else {
-      cout << "System: Failed to send message." << endl;
-    }
+    cout << "System: Message sent: "
+         << (status.ok() ? "OK" : status.error_message()) << endl;
   }
 
   void ReadChat() {
     ChatReader reader;
     reader.set_name(user_name_);
-    if (reader_ == nullptr) {
-      reader_ = new Reader(stub_.get(), reader);
+    if (!reader_) {
+      reader_ = make_unique<ReadChatStub>(stub_.get(), reader);
     }
     Status status = reader_->Await();
-    cout << "Chat ended status=" << status.error_message() << endl;
+    cout << "System: Chat ended status: "
+         << (status.ok() ? "OK" : status.error_message()) << endl;
+
+    last_message_.CopyFrom(reader_->message_);
+    reader_.reset();
   }
 
   void EndChat() {
-    if (reader_ != nullptr) {
-      reader_->EndChat();
+    if (reader_) {
+      reader_->EndRead();
     }
   }
+
+  // for testing purposes
+  ChatMessage GetLastMessage() { return last_message_; }
 
 private:
-  std::unique_ptr<ChatService::Stub> stub_;
+  unique_ptr<ChatService::Stub> stub_;
   string user_name_;
-  Reader *reader_;
+  unique_ptr<ReadChatStub> reader_;
+  ChatMessage last_message_;
 };
-
-void threadFunc(ChatServiceClient &client) {
-  string message;
-  while (true) {
-    getline(std::cin, message);
-    if (message == "/quit") {
-      client.EndChat();
-      break;
-    }
-    client.Send(message);
-  }
-}
-
-int main(int argc, char **argv) {
-  if (argc != 2) {
-    cerr << "Usage: " << argv[0] << " USER_NAME" << endl;
-    return 1;
-  }
-
-  ChatServiceClient chatter(
-      argv[1], grpc::CreateChannel("localhost:9090",
-                                   grpc::InsecureChannelCredentials()));
-
-  thread t(threadFunc, std::ref(chatter));
-  t.detach();
-  chatter.ReadChat();
-  return 0;
-}

@@ -1,4 +1,4 @@
-
+#pragma once
 #define GRPC_CALLBACK_API_NONEXPERIMENTAL
 #include <grpc/grpc.h>
 #include <grpcpp/security/server_credentials.h>
@@ -12,8 +12,8 @@
 #include <stdio.h>
 #include <thread>
 
-#include "chatservice.grpc.pb.h"
-#include "chatservice.pb.h"
+#include "proto/chatservice.grpc.pb.h"
+#include "proto/chatservice.pb.h"
 
 using namespace std;
 using namespace grpc;
@@ -23,12 +23,17 @@ using namespace chat;
 class Reader : public grpc::ServerWriteReactor<ChatMessage> {
 public:
   atomic<bool> done{false};
+  string name;
 
   Reader(mutex *mu, const ChatReader *reader,
          std::vector<ChatMessage> *received_messages)
-      : mu_(mu), reader_(reader), received_messages_(received_messages),
-        next_message_(0) {
+      : name(reader->name()), mu_(mu), reader_(reader),
+        received_messages_(received_messages), next_message_(0) {
     NextWrite();
+  }
+
+  ~Reader() override {
+    cout << "System: Reader for " << name << " destroyed" << endl;
   }
 
   void OnWriteDone(bool ok) override {
@@ -40,38 +45,41 @@ public:
   }
 
   void OnDone() override {
-    cout << "RPC Completed" << endl;
+    cout << "System: RPC Completed" << endl;
     done = true;
+    // delete this;
   }
 
   void OnCancel() override {
-    cerr << "RPC Cancelled" << endl;
+    Finish(Status::CANCELLED);
+    cerr << "System: RPC Cancelled" << endl;
     done = true;
   }
 
-  void EndChat() { Finish(Status::OK); }
-
   void NextWrite() {
     lock_guard<mutex> lock(*mu_);
-    cout << "NextWrite called, next_message_: " << next_message_ << endl;
     if (next_message_ < received_messages_->size()) {
-      message_.CopyFrom(received_messages_->at(next_message_));
-      next_message_++;
-      StartWrite(&message_);
+      StartWrite(&received_messages_->at(next_message_++));
     }
   }
+
+  void EndChat() { Finish(Status::OK); }
 
 private:
   mutex *mu_;
   const ChatReader *reader_;
   std::vector<ChatMessage> *received_messages_;
   size_t next_message_;
-  ChatMessage message_;
 };
 
 class ChatServiceImpl final : public ChatService::CallbackService {
 public:
   explicit ChatServiceImpl() {}
+
+  ~ChatServiceImpl() override {
+    EndAllReaders();
+    cout << "System: ChatServiceImpl destroyed" << endl;
+  }
 
   ServerUnaryReactor *Send(CallbackServerContext *context,
                            const ChatMessage *message,
@@ -80,11 +88,11 @@ public:
     received_messages_.push_back(*message);
     mu_.unlock();
 
-    cout << "Received message from " << message->name() << ": "
+    cout << "System: Received message from " << message->name() << ": "
          << message->message() << endl;
 
     notifying_.notify_one();
-    response->set_result("Message received");
+    response->set_result("OK");
     auto *reactor = context->DefaultReactor();
     reactor->Finish(Status::OK);
     return reactor;
@@ -104,12 +112,30 @@ public:
       notifying_.wait(lock);
 
       for (Reader *r : received_readers_) {
-        cout << "Notifying reader" << endl;
         if (r->done)
           continue;
+        cout << "System: Notifying reader " << r->name << endl;
         r->NextWrite();
       }
     }
+  }
+
+  // for testing purposes
+  std::vector<ChatMessage> GetReceivedMessages() {
+    lock_guard<mutex> lock(mu_);
+    return received_messages_;
+  }
+
+  void EndAllReaders() {
+    lock_guard<mutex> lock(readers_mu_);
+    for (Reader *r : received_readers_) {
+      if (!r->done) {
+        r->EndChat();
+      } else {
+        delete r;
+      }
+    }
+    received_readers_.clear();
   }
 
 private:
@@ -119,23 +145,3 @@ private:
   std::vector<ChatMessage> received_messages_;
   std::vector<Reader *> received_readers_;
 };
-
-void RunServer(const std::string &server_address) {
-  ServerBuilder builder;
-  ChatServiceImpl service;
-  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-  builder.RegisterService(&service);
-  cout << "Server listening on " << server_address << endl;
-  std::unique_ptr<Server> server(builder.BuildAndStart());
-
-  thread notify_thread(&ChatServiceImpl::NotifyReadersThread, &service);
-  notify_thread.detach();
-  server->Wait();
-}
-
-int main(int argc, char **argv) {
-  std::string server_address = "0.0.0.0:9090";
-  RunServer(server_address);
-
-  return 0;
-}
