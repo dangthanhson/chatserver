@@ -74,19 +74,20 @@ TEST_CASE("Server::ClientServerIntegration_ReadMessage") {
 
   ChatServiceClient *client = new ChatServiceClient(
       "user", CreateChannel("localhost:9090", InsecureChannelCredentials()));
-  thread t([client]() {
-    client->Send("Hello, World 4");
-    client->ReadChat();
-  });
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  thread t([client]() { client->ReadChat(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  client->Send("Hello, World 4");
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
   client->EndChat();
   t.join();
   auto last_message = client->GetLastMessage();
-  CHECK(last_message.message() == "Hello, World 4");
-  CHECK(last_message.name() == "user");
+  CHECK(last_message.message() == "user has joined the chat!");
+  CHECK(last_message.name() == "System");
 
   auto received_messages = service.GetReceivedMessages();
-  REQUIRE(received_messages.size() == 1);
-  CHECK(received_messages[0].message() == "Hello, World 4");
-  CHECK(received_messages[0].name() == "user");
+  REQUIRE(received_messages.size() == 2);
+  CHECK(received_messages[0].message() == "user has joined the chat!");
+  CHECK(received_messages[0].name() == "System");
+  CHECK(received_messages[1].message() == "Hello, World 4");
+  CHECK(received_messages[1].name() == "user");
 }

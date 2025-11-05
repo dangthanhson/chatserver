@@ -25,10 +25,10 @@ public:
   atomic<bool> done{false};
   string name;
 
-  Reader(mutex *mu, const ChatReader *reader,
+  Reader(const ChatReader *reader, mutex *mu, condition_variable *notifying,
          std::vector<ChatMessage> *received_messages)
-      : name(reader->name()), mu_(mu), reader_(reader),
-        received_messages_(received_messages), next_message_(0) {
+      : name(reader->name()), mu_(mu), reader_(reader), notifying_(notifying),
+        received_messages_(received_messages) {
     NextWrite();
   }
 
@@ -47,13 +47,12 @@ public:
   void OnDone() override {
     cout << "System: RPC Completed" << endl;
     done = true;
-    // delete this;
+    notifying_->notify_one();
   }
 
   void OnCancel() override {
     Finish(Status::CANCELLED);
     cerr << "System: RPC Cancelled" << endl;
-    done = true;
   }
 
   void NextWrite() {
@@ -68,8 +67,9 @@ public:
 private:
   mutex *mu_;
   const ChatReader *reader_;
+  condition_variable *notifying_;
   std::vector<ChatMessage> *received_messages_;
-  size_t next_message_;
+  size_t next_message_{0};
 };
 
 class ChatServiceImpl final : public ChatService::CallbackService {
@@ -99,10 +99,33 @@ public:
 
   grpc::ServerWriteReactor<ChatMessage> *
   ReadChat(CallbackServerContext *context, const ChatReader *reader) override {
-    Reader *r = new Reader(&mu_, reader, &received_messages_);
+    ChatMessage m;
+    m.set_name("System");
+    m.set_message(reader->name() + " has joined the chat!");
+    mu_.lock();
+    received_messages_.push_back(m);
+    mu_.unlock();
+
+    Reader *r = new Reader(reader, &mu_, &notifying_, &received_messages_);
     unique_lock<mutex> lock(readers_mu_);
     received_readers_.push_back(r);
     return r;
+  }
+
+  void EndChat(const Reader *reader) {
+    unique_lock<mutex> lock(readers_mu_);
+    auto it = find_if(received_readers_.begin(), received_readers_.end(),
+                      [reader](Reader *r) { return r == reader; });
+    ChatMessage m;
+    if (it != received_readers_.end()) {
+      m.set_name("System");
+      m.set_message((*it)->name + " has left the chat!");
+      received_readers_.erase(it);
+    }
+
+    mu_.lock();
+    received_messages_.push_back(m);
+    mu_.unlock();
   }
 
   void NotifyReadersThread() {
@@ -111,8 +134,23 @@ public:
       notifying_.wait(lock);
 
       for (Reader *r : received_readers_) {
-        if (r->done)
-          continue;
+        if (r->done) {
+          ChatMessage m;
+          m.set_name("System");
+          m.set_message(r->name + " has left the chat!");
+
+          mu_.lock();
+          received_messages_.push_back(m);
+          mu_.unlock();
+        }
+      }
+
+      received_readers_.erase(
+          std::remove_if(received_readers_.begin(), received_readers_.end(),
+                         [](Reader *r) { return r->done.load(); }),
+          received_readers_.end());
+
+      for (Reader *r : received_readers_) {
         cout << "System: Notifying reader " << r->name << endl;
         r->NextWrite();
       }
@@ -131,4 +169,5 @@ private:
   condition_variable notifying_{};
   std::vector<ChatMessage> received_messages_;
   std::vector<Reader *> received_readers_;
+  friend class Reader;
 };
