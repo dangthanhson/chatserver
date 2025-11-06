@@ -29,7 +29,7 @@ public:
          std::vector<ChatMessage> *received_messages)
       : name(reader->name()), mu_(mu), reader_(reader), notifying_(notifying),
         received_messages_(received_messages) {
-    NextWrite();
+    // NextWrite();
   }
 
   ~Reader() override {
@@ -77,7 +77,15 @@ public:
   explicit ChatServiceImpl() {}
 
   ~ChatServiceImpl() override {
+    done_ = true;
+    notifying_.notify_all();
+    lock_guard<mutex> lock(readers_mu_);
     cout << "System: ChatServiceImpl destroyed" << endl;
+  }
+
+  void EndServer() {
+    done_ = true;
+    notifying_.notify_all();
   }
 
   ServerUnaryReactor *Send(CallbackServerContext *context,
@@ -107,8 +115,10 @@ public:
     mu_.unlock();
 
     Reader *r = new Reader(reader, &mu_, &notifying_, &received_messages_);
-    unique_lock<mutex> lock(readers_mu_);
+    readers_mu_.lock();
     received_readers_.push_back(r);
+    readers_mu_.unlock();
+    notifying_.notify_one();
     return r;
   }
 
@@ -132,6 +142,8 @@ public:
     while (true) {
       unique_lock<mutex> lock(readers_mu_);
       notifying_.wait(lock);
+      if (done_)
+        break;
 
       for (Reader *r : received_readers_) {
         if (r->done) {
@@ -169,5 +181,6 @@ private:
   condition_variable notifying_{};
   std::vector<ChatMessage> received_messages_;
   std::vector<Reader *> received_readers_;
+  atomic_bool done_{false};
   friend class Reader;
 };
